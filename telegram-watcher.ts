@@ -1,4 +1,3 @@
-import https from 'https';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -70,30 +69,23 @@ let firstRun = true;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let watchTimeout: ReturnType<typeof setTimeout> | null = null;
 
-function fetchPage(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const req = https.get(TELEGRAM_URL, {
+async function fetchPage(): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(TELEGRAM_URL, {
+      signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
       },
-    }, (res) => {
-      if (res.statusCode !== 200) {
-        reject(new Error(`HTTP ${res.statusCode}`));
-        return;
-      }
-      res.setEncoding('utf8');
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve(data));
     });
-    req.on('error', reject);
-    req.setTimeout(15000, () => {
-      req.destroy();
-      reject(new Error('Timeout'));
-    });
-  });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function decodeEntities(text: string): string {
