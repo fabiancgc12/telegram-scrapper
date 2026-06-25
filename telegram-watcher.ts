@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { exec } from 'child_process';
 import { z } from 'zod';
+import notifier from 'node-notifier';
 
 interface TelegramMessage {
   id: number;
@@ -17,18 +18,17 @@ const ConfigSchema = z.object({
   intervalSec: z.number().min(3, 'El intervalo minimo es 3 segundos'),
 });
 
-import notifier from 'node-notifier';
-
 function showErrorNotification(title: string, message: string): void {
   console.error(`\n  ERROR: ${title} - ${message}`);
   try {
     notifier.notify({
       title: `Error: ${title}`,
-      message: message.substring(0, 200),
+      message: Array.from(message).slice(0, 200).join(''),
       sound: true,
       appID: 'TelegramWatcher',
     });
-  } catch {
+  } catch (e) {
+    console.error('  Error al enviar notificacion de error:', e);
   }
 }
 
@@ -54,8 +54,9 @@ function loadConfig(): AppConfig | null {
 }
 
 try {
-  config = loadConfig()!;
-  if (!config) process.exit(1);
+  const loaded = loadConfig();
+  if (!loaded) process.exit(1);
+  config = loaded;
 } catch (err) {
   showErrorNotification('Error de lectura', `No se pudo leer config.json: ${(err as Error).message}`);
   process.exit(1);
@@ -64,9 +65,17 @@ try {
 TELEGRAM_URL = `https://t.me/s/${config.channel}`;
 
 const knownMessageIds = new Set<number>();
+const MAX_KNOWN_IDS = 5000;
 let firstRun = true;
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let watchTimeout: ReturnType<typeof setTimeout> | null = null;
+let polling = false;
+
+function pruneKnownIds(): void {
+  if (knownMessageIds.size <= MAX_KNOWN_IDS) return;
+  const toRemove = Array.from(knownMessageIds).slice(0, knownMessageIds.size - MAX_KNOWN_IDS);
+  for (const id of toRemove) knownMessageIds.delete(id);
+}
 
 async function fetchPage(): Promise<string> {
   const controller = new AbortController();
@@ -106,10 +115,16 @@ function parseMessages(html: string): TelegramMessage[] {
   for (let i = 1; i < parts.length; i++) {
     const block = parts[i];
     const idMatch = block.match(/data-post="[^"]+\/(\d+)"/);
-    if (!idMatch) continue;
+    if (!idMatch) {
+      if (process.env.DEBUG) console.warn('  parseMessages: no match data-post en bloque', i);
+      continue;
+    }
     const id = parseInt(idMatch[1], 10);
     const textMatch = block.match(/<div class="tgme_widget_message_text[^>]*>([\s\S]*?)<\/div>/);
-    if (!textMatch) continue;
+    if (!textMatch) {
+      if (process.env.DEBUG) console.warn('  parseMessages: no match message_text en msg', id);
+      continue;
+    }
     const text = decodeEntities(textMatch[1])
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<[^>]+>/g, '')
@@ -155,20 +170,25 @@ function showMessageWindow(message: TelegramMessage): void {
 
   const body: string[] = [];
   let totalChars = 0;
+  const MAX_CMD_CHARS = 6000;
   for (const line of lines) {
     const escaped = escapeCmd(line);
     totalChars += escaped.length;
     if (totalChars > 800) break;
     body.push(escaped ? `echo ${escaped}` : 'echo.');
   }
-
-  const footer = [
-    'echo.',
-    'echo ========================================',
-    'echo.',
-    'echo Presione una tecla para cerrar...',
-    'pause > nul',
-  ];
+  const fullCmd = [...header, ...body, ...footer].join(' & ');
+  if (fullCmd.length > MAX_CMD_CHARS) {
+    body.length = 0;
+    let safe = 0;
+    for (const line of lines) {
+      const escaped = escapeCmd(line);
+      safe += escaped.length;
+      if (safe > 300) break;
+      body.push(escaped ? `echo ${escaped}` : 'echo.');
+    }
+    body.push('echo ... [mensaje truncado]');
+  }
 
   const all = [...header, ...body, ...footer].join(' & ');
   const title = escapeCmd(`Mensaje de @${config.channel}`);
@@ -179,8 +199,16 @@ function showMessageWindow(message: TelegramMessage): void {
   });
 }
 
+const footer = [
+  'echo.',
+  'echo ========================================',
+  'echo.',
+  'echo Presione una tecla para cerrar...',
+  'pause > nul',
+];
+
 function openBrowser(): void {
-  const url = `https://t.me/s/${escapeCmd(config.channel)}`;
+  const url = `https://t.me/s/${encodeURIComponent(config.channel)}`;
   const cmd = `start chrome "${url}"`;
   exec(cmd, (err) => {
     if (err) {
@@ -189,10 +217,14 @@ function openBrowser(): void {
   });
 }
 
+function truncateText(text: string, max: number): string {
+  return Array.from(text).slice(0, max).join('');
+}
+
 function sendNotification(message: TelegramMessage): void {
   notifier.notify({
     title: `Alerta en @${config.channel}`,
-    message: message.text.substring(0, 180),
+    message: truncateText(message.text, 180),
     sound: true,
     wait: true,
     appID: 'TelegramWatcher',
@@ -209,6 +241,11 @@ function sendNotification(message: TelegramMessage): void {
 }
 
 async function poll(): Promise<void> {
+  if (polling) {
+    console.log('  Saltando poll anterior aun en ejecucion...');
+    return;
+  }
+  polling = true;
   try {
     const now = new Date().toLocaleTimeString('es-ES');
     console.log(`\n[${now}] Consultando @${config.channel}...`);
@@ -226,7 +263,7 @@ async function poll(): Promise<void> {
       if (knownMessageIds.has(msg.id)) continue;
       knownMessageIds.add(msg.id);
       nuevos++;
-      const preview = msg.text.length > 90 ? msg.text.substring(0, 90) + '...' : msg.text;
+      const preview = truncateText(msg.text, 90);
       console.log(`  [${msg.id}] ${preview}`);
 
       if (firstRun) continue;
@@ -247,7 +284,15 @@ async function poll(): Promise<void> {
     }
   } catch (err) {
     console.error(`  Error: ${(err as Error).message}`);
+  } finally {
+    polling = false;
+    pruneKnownIds();
+    scheduleNext();
   }
+}
+
+function scheduleNext(): void {
+  pollTimer = setTimeout(poll, config.intervalSec * 1000);
 }
 
 function reloadConfig(): void {
@@ -269,9 +314,9 @@ function reloadConfig(): void {
     console.log(`  Intervalo: ${config.intervalSec}s`);
     console.log(`  Keywords:  ${config.keywords.join(', ')}`);
 
-    if (config.intervalSec !== oldInterval) {
-      if (pollTimer) clearInterval(pollTimer);
-      pollTimer = setInterval(poll, config.intervalSec * 1000);
+    if (config.intervalSec !== oldInterval && !polling) {
+      if (pollTimer) clearTimeout(pollTimer);
+      scheduleNext();
     }
   } catch (err) {
     showErrorNotification('Error recargando config', (err as Error).message);
@@ -295,12 +340,10 @@ console.log('  Watch config.json para recarga automatica');
 console.log('============================================');
 console.log('');
 
-poll().then(() => {
-  pollTimer = setInterval(poll, config.intervalSec * 1000);
-});
+poll();
 
 process.on('SIGINT', () => {
   console.log('\nDeteniendo watcher...');
-  if (pollTimer) clearInterval(pollTimer);
+  if (pollTimer) clearTimeout(pollTimer);
   process.exit(0);
 });
