@@ -4,6 +4,14 @@ const path = require('path');
 const os = require('os');
 const { exec } = require('child_process');
 
+const { z } = require('zod');
+
+const ConfigSchema = z.object({
+  channel: z.string().min(1, 'El nombre del canal no puede estar vacio'),
+  keywords: z.array(z.string().min(1)).min(1, 'Debe haber al menos una palabra clave'),
+  intervalMs: z.number().int('Debe ser un numero entero').min(3000, 'El intervalo minimo es 3000ms'),
+});
+
 let notifier;
 try {
   notifier = require('node-notifier');
@@ -13,23 +21,57 @@ try {
   process.exit(1);
 }
 
-const CONFIG = {
-  channel: 'el_Canal',
-  keywords: ['bcv', 'BCV'],
-  intervalMs: 12000,
-};
+function showErrorNotification(title, message) {
+  console.error(`\n  ERROR: ${title} - ${message}`);
+  try {
+    notifier.notify({
+      title: `Error: ${title}`,
+      message: message.substring(0, 200),
+      sound: true,
+      appID: 'TelegramWatcher',
+    });
+  } catch {
+  }
+}
+
+let config;
+try {
+  const configPath = path.join(__dirname, 'config.json');
+  if (!fs.existsSync(configPath)) {
+    showErrorNotification('Archivo no encontrado', `No se encontro config.json en ${configPath}`);
+    process.exit(1);
+  }
+  const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const result = ConfigSchema.safeParse(raw);
+  if (!result.success) {
+    const errors = result.error.errors.map(e => `  ${e.path.join('.')}: ${e.message}`).join('\n');
+    showErrorNotification('Configuracion invalida', `Errores en config.json:\n${errors}`);
+    console.error(errors);
+    process.exit(1);
+  }
+  config = result.data;
+} catch (err) {
+  if (err instanceof z.ZodError) {
+    const errors = err.errors.map(e => `  ${e.path.join('.')}: ${e.message}`).join('\n');
+    showErrorNotification('Configuracion invalida', `Errores en config.json:\n${errors}`);
+    console.error(errors);
+  } else {
+    showErrorNotification('Error de lectura', `No se pudo leer config.json: ${err.message}`);
+  }
+  process.exit(1);
+}
 
 const args = process.argv.slice(2);
 if (args.length > 0) {
   const userInterval = parseInt(args[0], 10);
   if (!isNaN(userInterval) && userInterval >= 3) {
-    CONFIG.intervalMs = userInterval * 1000;
+    config.intervalMs = userInterval * 1000;
   } else {
-    console.log(`Intervalo invalido: "${args[0]}". Usando default: ${CONFIG.intervalMs / 1000}s`);
+    console.log(`Intervalo invalido: "${args[0]}". Usando config: ${config.intervalMs / 1000}s`);
   }
 }
 
-const TELEGRAM_URL = `https://t.me/s/${CONFIG.channel}`;
+const TELEGRAM_URL = `https://t.me/s/${config.channel}`;
 
 let knownMessageIds = new Set();
 let firstRun = true;
@@ -91,7 +133,7 @@ function parseMessages(html) {
 
 function checkKeywords(text) {
   const lower = text.toLowerCase();
-  return CONFIG.keywords.some(kw => lower.includes(kw.toLowerCase()));
+  return config.keywords.some(kw => lower.includes(kw.toLowerCase()));
 }
 
 function showMessageWindow(message) {
@@ -106,12 +148,12 @@ function showMessageWindow(message) {
 
   const batContent = [
     '@echo off',
-    'title Mensaje de @' + CONFIG.channel,
+    'title Mensaje de @' + config.channel,
     'color 0B',
     'cls',
     'echo ========================================',
     'echo   MENSAJE DETECTADO',
-    'echo   @' + CONFIG.channel + ' - ' + dateStr,
+    'echo   @' + config.channel + ' - ' + dateStr,
     'echo ========================================',
     'echo.',
     'echo ' + safeMsg,
@@ -140,7 +182,7 @@ function openBrowser() {
 
 function sendNotification(message) {
   notifier.notify({
-    title: `Alerta en @${CONFIG.channel}`,
+    title: `Alerta en @${config.channel}`,
     message: message.text.substring(0, 180),
     sound: true,
     wait: true,
@@ -160,7 +202,7 @@ function sendNotification(message) {
 async function poll() {
   try {
     const now = new Date().toLocaleTimeString('es-ES');
-    console.log(`\n[${now}] Consultando @${CONFIG.channel}...`);
+    console.log(`\n[${now}] Consultando @${config.channel}...`);
 
     const html = await fetchPage();
     const messages = parseMessages(html);
@@ -201,16 +243,16 @@ async function poll() {
 
 console.log('');
 console.log('============================================');
-console.log('  Telegram Watcher - @' + CONFIG.channel);
+console.log('  Telegram Watcher - @' + config.channel);
 console.log('============================================');
-console.log('  Intervalo:  ' + CONFIG.intervalMs / 1000 + 's');
-console.log('  Keywords:   ' + CONFIG.keywords.join(', '));
+console.log('  Intervalo:  ' + config.intervalMs / 1000 + 's');
+console.log('  Keywords:   ' + config.keywords.join(', '));
 console.log('  Ctrl+C para detener');
 console.log('============================================');
 console.log('');
 
 poll().then(() => {
-  setInterval(poll, CONFIG.intervalMs);
+  setInterval(poll, config.intervalMs);
 });
 
 process.on('SIGINT', () => {
