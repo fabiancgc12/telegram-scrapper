@@ -1,0 +1,12 @@
+{
+  "name": "telegram-watcher",
+  "version": "1.0.0",
+  "description": "Watcher de canal de Telegram con notificaciones de palabras clave",
+  "main": "telegram-watcher.js",
+  "scripts": {
+    "start": "node telegram-watcher.js"
+  },
+  "dependencies": {
+    "node-notifier": "^10.0.1"
+  }
+}
