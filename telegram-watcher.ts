@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import { exec } from 'child_process';
 import { z } from 'zod';
 
@@ -126,37 +125,52 @@ function checkKeywords(text: string): boolean {
   return config.keywords.some(kw => lower.includes(kw.toLowerCase()));
 }
 
-function showMessageWindow(message: TelegramMessage): void {
-  const safeMsg = message.text
-    .replace(/"/g, '\\"')
-    .replace(/[\x00-\x08\x0E-\x1F]/g, '')
-    .substring(0, 1000);
+function escapeCmd(text: string): string {
+  return text
+    .replace(/\^/g, '^^')
+    .replace(/&/g, '^&')
+    .replace(/\|/g, '^|')
+    .replace(/</g, '^<')
+    .replace(/>/g, '^>')
+    .replace(/%/g, '^%')
+    .replace(/"/g, '^"');
+}
 
+function showMessageWindow(message: TelegramMessage): void {
   const dateStr = message.date
     ? new Date(message.date).toLocaleString('es-ES')
     : new Date().toLocaleString('es-ES');
 
-  const batContent = [
-    '@echo off',
-    'title Mensaje de @' + config.channel,
-    'color 0B',
-    'cls',
+  const lines = message.text.split('\n');
+  const header = [
     'echo ========================================',
-    'echo   MENSAJE DETECTADO',
-    'echo   @' + config.channel + ' - ' + dateStr,
+    `echo   MENSAJE DETECTADO - @${config.channel}`,
+    `echo   ${escapeCmd(dateStr)}`,
     'echo ========================================',
     'echo.',
-    'echo ' + safeMsg,
-    'echo.',
-    'echo ========================================',
-    'echo.',
-    'echo Presione una tecla para cerrar esta ventana...',
-    'pause > nul',
-  ].join('\r\n');
+  ];
 
-  const tmpFile = path.join(os.tmpdir(), `tg_msg_${Date.now()}_${message.id}.bat`);
-  fs.writeFileSync(tmpFile, batContent, 'utf8');
-  exec(`start "" "${tmpFile}"`, (err) => {
+  const body: string[] = [];
+  let totalChars = 0;
+  for (const line of lines) {
+    const escaped = escapeCmd(line);
+    totalChars += escaped.length;
+    if (totalChars > 800) break;
+    body.push(escaped ? `echo ${escaped}` : 'echo.');
+  }
+
+  const footer = [
+    'echo.',
+    'echo ========================================',
+    'echo.',
+    'echo Presione una tecla para cerrar...',
+    'pause > nul',
+  ];
+
+  const all = [...header, ...body, ...footer].join(' & ');
+  const cmd = `start cmd /c "title Mensaje de @${config.channel} & color 0B & cls & ${all}"`;
+
+  exec(cmd, (err) => {
     if (err) console.error('  Error abriendo ventana de mensaje:', err.message);
   });
 }
