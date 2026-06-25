@@ -1,10 +1,17 @@
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { exec } = require('child_process');
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { exec } from 'child_process';
+import { z } from 'zod';
 
-const { z } = require('zod');
+interface TelegramMessage {
+  id: number;
+  text: string;
+  date: string | null;
+}
+
+type AppConfig = z.infer<typeof ConfigSchema>;
 
 const ConfigSchema = z.object({
   channel: z.string().min(1, 'El nombre del canal no puede estar vacio'),
@@ -12,16 +19,9 @@ const ConfigSchema = z.object({
   intervalSec: z.number().min(3, 'El intervalo minimo es 3 segundos'),
 });
 
-let notifier;
-try {
-  notifier = require('node-notifier');
-} catch {
-  console.error('Error: Falta la dependencia "node-notifier".');
-  console.error('Ejecute: npm install');
-  process.exit(1);
-}
+import notifier from 'node-notifier';
 
-function showErrorNotification(title, message) {
+function showErrorNotification(title: string, message: string): void {
   console.error(`\n  ERROR: ${title} - ${message}`);
   try {
     notifier.notify({
@@ -34,12 +34,12 @@ function showErrorNotification(title, message) {
   }
 }
 
-let config;
-let TELEGRAM_URL;
+let config: AppConfig;
+let TELEGRAM_URL: string;
 
 const configPath = path.join(__dirname, 'config.json');
 
-function loadConfig() {
+function loadConfig(): AppConfig | null {
   if (!fs.existsSync(configPath)) {
     showErrorNotification('Archivo no encontrado', `No se encontro config.json en ${configPath}`);
     process.exit(1);
@@ -47,7 +47,7 @@ function loadConfig() {
   const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   const result = ConfigSchema.safeParse(raw);
   if (!result.success) {
-    const errors = result.error.errors.map(e => `  ${e.path.join('.')}: ${e.message}`).join('\n');
+    const errors = result.error.issues.map(e => `  ${e.path.join('.')}: ${e.message}`).join('\n');
     showErrorNotification('Configuracion invalida', `Errores en config.json:\n${errors}`);
     console.error(errors);
     return null;
@@ -56,28 +56,21 @@ function loadConfig() {
 }
 
 try {
-  config = loadConfig();
+  config = loadConfig()!;
   if (!config) process.exit(1);
 } catch (err) {
-  showErrorNotification('Error de lectura', `No se pudo leer config.json: ${err.message}`);
+  showErrorNotification('Error de lectura', `No se pudo leer config.json: ${(err as Error).message}`);
   process.exit(1);
 }
 
 TELEGRAM_URL = `https://t.me/s/${config.channel}`;
 
-const args = process.argv.slice(2);
-const cliInterval = args.length > 0 ? parseInt(args[0], 10) : null;
-if (cliInterval !== null && !isNaN(cliInterval) && cliInterval >= 3) {
-  config.intervalSec = cliInterval;
-} else if (cliInterval !== null) {
-  console.log(`Intervalo invalido: "${args[0]}". Usando config: ${config.intervalSec}s`);
-}
-
-let knownMessageIds = new Set();
+const knownMessageIds = new Set<number>();
 let firstRun = true;
-let pollTimer = null;
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let watchTimeout: ReturnType<typeof setTimeout> | null = null;
 
-function fetchPage() {
+function fetchPage(): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = https.get(TELEGRAM_URL, {
       headers: {
@@ -103,8 +96,18 @@ function fetchPage() {
   });
 }
 
-function parseMessages(html) {
-  const messages = [];
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(parseInt(code, 10)));
+}
+
+function parseMessages(html: string): TelegramMessage[] {
+  const messages: TelegramMessage[] = [];
   const parts = html.split('<div class="tgme_widget_message_wrap');
   for (let i = 1; i < parts.length; i++) {
     const block = parts[i];
@@ -113,15 +116,9 @@ function parseMessages(html) {
     const id = parseInt(idMatch[1], 10);
     const textMatch = block.match(/<div class="tgme_widget_message_text[^>]*>([\s\S]*?)<\/div>/);
     if (!textMatch) continue;
-    const text = textMatch[1]
+    const text = decodeEntities(textMatch[1])
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<[^>]+>/g, '')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
       .replace(/\n{3,}/g, '\n\n')
       .trim();
     if (!text) continue;
@@ -132,12 +129,12 @@ function parseMessages(html) {
   return messages;
 }
 
-function checkKeywords(text) {
+function checkKeywords(text: string): boolean {
   const lower = text.toLowerCase();
   return config.keywords.some(kw => lower.includes(kw.toLowerCase()));
 }
 
-function showMessageWindow(message) {
+function showMessageWindow(message: TelegramMessage): void {
   const safeMsg = message.text
     .replace(/"/g, '\\"')
     .replace(/[\x00-\x08\x0E-\x1F]/g, '')
@@ -172,7 +169,7 @@ function showMessageWindow(message) {
   });
 }
 
-function openBrowser() {
+function openBrowser(): void {
   const cmd = `start chrome "${TELEGRAM_URL}"`;
   exec(cmd, (err) => {
     if (err) {
@@ -181,7 +178,7 @@ function openBrowser() {
   });
 }
 
-function sendNotification(message) {
+function sendNotification(message: TelegramMessage): void {
   notifier.notify({
     title: `Alerta en @${config.channel}`,
     message: message.text.substring(0, 180),
@@ -200,7 +197,7 @@ function sendNotification(message) {
   });
 }
 
-async function poll() {
+async function poll(): Promise<void> {
   try {
     const now = new Date().toLocaleTimeString('es-ES');
     console.log(`\n[${now}] Consultando @${config.channel}...`);
@@ -224,7 +221,7 @@ async function poll() {
       if (firstRun) continue;
 
       if (checkKeywords(msg.text)) {
-        console.log(`  Palabra clave detectada! Enviando notificacion...`);
+        console.log('  Palabra clave detectada! Enviando notificacion...');
         sendNotification(msg);
       }
     }
@@ -238,11 +235,11 @@ async function poll() {
       console.log('  Sin novedades.');
     }
   } catch (err) {
-    console.error(`  Error: ${err.message}`);
+    console.error(`  Error: ${(err as Error).message}`);
   }
 }
 
-function reloadConfig() {
+function reloadConfig(): void {
   try {
     const newConfig = loadConfig();
     if (!newConfig) return;
@@ -250,7 +247,7 @@ function reloadConfig() {
     const oldChannel = config.channel;
     const oldInterval = config.intervalSec;
 
-    Object.assign(config, newConfig);
+    config = newConfig;
 
     if (config.channel !== oldChannel) {
       TELEGRAM_URL = `https://t.me/s/${config.channel}`;
@@ -261,16 +258,15 @@ function reloadConfig() {
     console.log(`  Intervalo: ${config.intervalSec}s`);
     console.log(`  Keywords:  ${config.keywords.join(', ')}`);
 
-    if (config.intervalSec !== oldInterval && !cliInterval) {
+    if (config.intervalSec !== oldInterval) {
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = setInterval(poll, config.intervalSec * 1000);
     }
   } catch (err) {
-    showErrorNotification('Error recargando config', err.message);
+    showErrorNotification('Error recargando config', (err as Error).message);
   }
 }
 
-let watchTimeout = null;
 fs.watch(configPath, (eventType) => {
   if (eventType !== 'change') return;
   if (watchTimeout) clearTimeout(watchTimeout);
