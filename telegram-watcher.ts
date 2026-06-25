@@ -12,7 +12,7 @@ interface TelegramMessage {
 type AppConfig = z.infer<typeof ConfigSchema>;
 
 const ConfigSchema = z.object({
-  channel: z.string().min(1, 'El nombre del canal no puede estar vacio'),
+  channel: z.string().regex(/^\w+$/, 'El canal solo acepta letras, numeros y guion bajo'),
   keywords: z.array(z.string().min(1)).min(1, 'Debe haber al menos una palabra clave'),
   intervalSec: z.number().min(3, 'El intervalo minimo es 3 segundos'),
 });
@@ -88,13 +88,16 @@ async function fetchPage(): Promise<string> {
 }
 
 function decodeEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(parseInt(code, 10)));
+  return text.replace(/&#?(\w+);/g, (_, code: string) => {
+    if (code === 'amp') return '&';
+    if (code === 'lt') return '<';
+    if (code === 'gt') return '>';
+    if (code === 'quot') return '"';
+    if (code === '#39') return "'";
+    if (code.startsWith('x')) return String.fromCharCode(parseInt(code.slice(1), 16));
+    const n = parseInt(code, 10);
+    return isNaN(n) ? `&${code};` : String.fromCharCode(n);
+  });
 }
 
 function parseMessages(html: string): TelegramMessage[] {
@@ -168,7 +171,8 @@ function showMessageWindow(message: TelegramMessage): void {
   ];
 
   const all = [...header, ...body, ...footer].join(' & ');
-  const cmd = `start cmd /c "title Mensaje de @${config.channel} & color 0B & cls & ${all}"`;
+  const title = escapeCmd(`Mensaje de @${config.channel}`);
+  const cmd = `start cmd /c "title ${title} & color 0B & cls & ${all}"`;
 
   exec(cmd, (err) => {
     if (err) console.error('  Error abriendo ventana de mensaje:', err.message);
@@ -176,10 +180,11 @@ function showMessageWindow(message: TelegramMessage): void {
 }
 
 function openBrowser(): void {
-  const cmd = `start chrome "${TELEGRAM_URL}"`;
+  const url = `https://t.me/s/${escapeCmd(config.channel)}`;
+  const cmd = `start chrome "${url}"`;
   exec(cmd, (err) => {
     if (err) {
-      exec(`start "" "${TELEGRAM_URL}"`);
+      exec(`start "" "${url}"`);
     }
   });
 }
