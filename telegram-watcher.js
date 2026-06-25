@@ -9,7 +9,7 @@ const { z } = require('zod');
 const ConfigSchema = z.object({
   channel: z.string().min(1, 'El nombre del canal no puede estar vacio'),
   keywords: z.array(z.string().min(1)).min(1, 'Debe haber al menos una palabra clave'),
-  intervalMs: z.number().int('Debe ser un numero entero').min(3000, 'El intervalo minimo es 3000ms'),
+  intervalSec: z.number().min(3, 'El intervalo minimo es 3 segundos'),
 });
 
 let notifier;
@@ -35,8 +35,11 @@ function showErrorNotification(title, message) {
 }
 
 let config;
-try {
-  const configPath = path.join(__dirname, 'config.json');
+let TELEGRAM_URL;
+
+const configPath = path.join(__dirname, 'config.json');
+
+function loadConfig() {
   if (!fs.existsSync(configPath)) {
     showErrorNotification('Archivo no encontrado', `No se encontro config.json en ${configPath}`);
     process.exit(1);
@@ -47,34 +50,32 @@ try {
     const errors = result.error.errors.map(e => `  ${e.path.join('.')}: ${e.message}`).join('\n');
     showErrorNotification('Configuracion invalida', `Errores en config.json:\n${errors}`);
     console.error(errors);
-    process.exit(1);
+    return null;
   }
-  config = result.data;
+  return result.data;
+}
+
+try {
+  config = loadConfig();
+  if (!config) process.exit(1);
 } catch (err) {
-  if (err instanceof z.ZodError) {
-    const errors = err.errors.map(e => `  ${e.path.join('.')}: ${e.message}`).join('\n');
-    showErrorNotification('Configuracion invalida', `Errores en config.json:\n${errors}`);
-    console.error(errors);
-  } else {
-    showErrorNotification('Error de lectura', `No se pudo leer config.json: ${err.message}`);
-  }
+  showErrorNotification('Error de lectura', `No se pudo leer config.json: ${err.message}`);
   process.exit(1);
 }
 
-const args = process.argv.slice(2);
-if (args.length > 0) {
-  const userInterval = parseInt(args[0], 10);
-  if (!isNaN(userInterval) && userInterval >= 3) {
-    config.intervalMs = userInterval * 1000;
-  } else {
-    console.log(`Intervalo invalido: "${args[0]}". Usando config: ${config.intervalMs / 1000}s`);
-  }
-}
+TELEGRAM_URL = `https://t.me/s/${config.channel}`;
 
-const TELEGRAM_URL = `https://t.me/s/${config.channel}`;
+const args = process.argv.slice(2);
+const cliInterval = args.length > 0 ? parseInt(args[0], 10) : null;
+if (cliInterval !== null && !isNaN(cliInterval) && cliInterval >= 3) {
+  config.intervalSec = cliInterval;
+} else if (cliInterval !== null) {
+  console.log(`Intervalo invalido: "${args[0]}". Usando config: ${config.intervalSec}s`);
+}
 
 let knownMessageIds = new Set();
 let firstRun = true;
+let pollTimer = null;
 
 function fetchPage() {
   return new Promise((resolve, reject) => {
@@ -241,21 +242,58 @@ async function poll() {
   }
 }
 
+function reloadConfig() {
+  try {
+    const newConfig = loadConfig();
+    if (!newConfig) return;
+
+    const oldChannel = config.channel;
+    const oldInterval = config.intervalSec;
+
+    Object.assign(config, newConfig);
+
+    if (config.channel !== oldChannel) {
+      TELEGRAM_URL = `https://t.me/s/${config.channel}`;
+    }
+
+    console.log(`\n[${new Date().toLocaleTimeString()}] Config recargada:`);
+    console.log(`  Canal:     @${config.channel}`);
+    console.log(`  Intervalo: ${config.intervalSec}s`);
+    console.log(`  Keywords:  ${config.keywords.join(', ')}`);
+
+    if (config.intervalSec !== oldInterval && !cliInterval) {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(poll, config.intervalSec * 1000);
+    }
+  } catch (err) {
+    showErrorNotification('Error recargando config', err.message);
+  }
+}
+
+let watchTimeout = null;
+fs.watch(configPath, (eventType) => {
+  if (eventType !== 'change') return;
+  if (watchTimeout) clearTimeout(watchTimeout);
+  watchTimeout = setTimeout(reloadConfig, 400);
+});
+
 console.log('');
 console.log('============================================');
 console.log('  Telegram Watcher - @' + config.channel);
 console.log('============================================');
-console.log('  Intervalo:  ' + config.intervalMs / 1000 + 's');
+console.log('  Intervalo:  ' + config.intervalSec + 's');
 console.log('  Keywords:   ' + config.keywords.join(', '));
 console.log('  Ctrl+C para detener');
+console.log('  Watch config.json para recarga automatica');
 console.log('============================================');
 console.log('');
 
 poll().then(() => {
-  setInterval(poll, config.intervalMs);
+  pollTimer = setInterval(poll, config.intervalSec * 1000);
 });
 
 process.on('SIGINT', () => {
   console.log('\nDeteniendo watcher...');
+  if (pollTimer) clearInterval(pollTimer);
   process.exit(0);
 });

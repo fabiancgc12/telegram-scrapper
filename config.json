@@ -1,5 +1,5 @@
 {
   "channel": "el_Canal",
   "keywords": ["bcv", "BCV"],
-  "intervalMs": 10000
+  "intervalSec": 12
 }
